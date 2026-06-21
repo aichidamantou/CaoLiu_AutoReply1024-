@@ -1,0 +1,16 @@
+services:
+  caoliu-auto-reply:
+    build: .
+    container_name: caoliu_auto_reply
+    restart: unless-stopped
+    ports:
+      # Web 管理面板，外部映射 8888 端口
+      - "8888:8888"
+    volumes:
+      # 直接把当前目录挂载进去，config.yml 和 cookies 在宿主机上持久化
+      - .:/app
+    environment:
+      - TZ=Asia/Shanghai
+      - WEB_PORT=8888    # 设置此变量启动 Web UI，不设置则纯命令行模式
+    stdin_open: false
+    tty: false

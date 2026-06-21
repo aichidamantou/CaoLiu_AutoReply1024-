@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>草榴自动回复 - Web 面板</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: #0f1923; color: #e0e0e0; height: 100vh; overflow: hidden; }
+.container { display: flex; height: 100vh; }
+.left { width: 420px; min-width: 420px; display: flex; flex-direction: column; border-right: 1px solid #1e2d3d; }
+.right { flex: 1; display: flex; flex-direction: column; background: #0a0f16; }
+
+.panel { background: #15202b; margin: 8px; border-radius: 8px; border: 1px solid #1e2d3d; overflow: hidden; }
+.panel-header { background: #1a2d3d; padding: 8px 14px; font-size: 13px; font-weight: 600; color: #8ab4f8; display: flex; align-items: center; gap: 8px; }
+.panel-header .badge { font-size: 10px; background: #2a4a6a; padding: 1px 6px; border-radius: 8px; color: #8ab4f8; }
+
+/* 左上：参数面板 */
+.params-panel { flex-shrink: 0; max-height: 360px; }
+.params-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 10px 14px; font-size: 12px; }
+.param-item { display: flex; flex-direction: column; gap: 2px; }
+.param-label { color: #8899aa; font-size: 11px; }
+.param-value { color: #e0e0e0; font-weight: 500; }
+.param-value.user { color: #8ab4f8; }
+.param-value.ok { color: #5cd68a; }
+.param-value.warn { color: #f5a623; }
+
+/* 左下：日志面板 */
+.log-panel { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.log-content { flex: 1; overflow-y: auto; padding: 6px 14px; font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace; font-size: 11px; line-height: 1.6; background: #0a0f16; }
+.log-content::-webkit-scrollbar { width: 4px; }
+.log-content::-webkit-scrollbar-thumb { background: #2a4a6a; border-radius: 2px; }
+.log-line { color: #8899aa; white-space: pre-wrap; word-break: break-all; }
+.log-line[level="INFO"] { color: #b0bec5; }
+.log-line[level="WARNING"] { color: #f5a623; }
+.log-line[level="ERROR"] { color: #e74c3c; }
+.log-line[level="DEBUG"] { color: #5a7a9a; }
+
+/* 右侧：截图预览 + 状态栏 */
+.screenshot-area { flex: 1; position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+.screenshot-area img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; }
+.status-bar { height: 32px; background: #15202b; border-top: 1px solid #1e2d3d; display: flex; align-items: center; padding: 0 14px; font-size: 12px; gap: 16px; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.status-dot.running { background: #5cd68a; box-shadow: 0 0 6px #5cd68a88; }
+.status-dot.sleeping { background: #f5a623; box-shadow: 0 0 6px #f5a62388; }
+.status-dot.error { background: #e74c3c; box-shadow: 0 0 6px #e74c3c88; }
+.status-text { color: #8899aa; }
+.status-stat { color: #5cd68a; }
+
+/* 编辑覆盖层 */
+.overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 100; align-items: center; justify-content: center; }
+.overlay.active { display: flex; }
+.overlay-content { background: #15202b; border: 1px solid #2a4a6a; border-radius: 10px; width: 80%; max-width: 700px; max-height: 80vh; display: flex; flex-direction: column; }
+.overlay-header { padding: 12px 16px; border-bottom: 1px solid #1e2d3d; font-size: 14px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+.overlay-header .close-btn { background: none; border: none; color: #8899aa; font-size: 20px; cursor: pointer; padding: 0 4px; }
+.overlay-header .close-btn:hover { color: #fff; }
+.overlay-body { flex: 1; padding: 12px 16px; overflow-y: auto; }
+.overlay-body textarea { width: 100%; height: 400px; background: #0a0f16; color: #b0bec5; border: 1px solid #1e2d3d; border-radius: 6px; padding: 10px; font-family: monospace; font-size: 12px; resize: vertical; }
+.overlay-footer { padding: 10px 16px; border-top: 1px solid #1e2d3d; display: flex; gap: 8px; justify-content: flex-end; }
+.btn { padding: 6px 16px; border: none; border-radius: 6px; font-size: 12px; cursor: pointer; font-weight: 500; }
+.btn-primary { background: #1a73e8; color: #fff; }
+.btn-primary:hover { background: #1557b0; }
+.btn-secondary { background: #2a3a4a; color: #b0bec5; }
+.btn-secondary:hover { background: #3a4a5a; }
+
+/* 回复摘要 */
+.reply-summary { padding: 8px 14px; border-top: 1px solid #1e2d3d; font-size: 11px; color: #5cd68a; }
+.reply-summary .label { color: #8899aa; }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <!-- 左侧栏 -->
+  <div class="left">
+    <!-- 参数面板 -->
+    <div class="panel params-panel">
+      <div class="panel-header">
+        📊 运行参数
+        <span class="badge" id="runtime-badge">00:00:00</span>
+        <button class="btn btn-secondary" style="margin-left:auto;padding:2px 10px;font-size:11px;" onclick="openEditor()">编辑配置</button>
+      </div>
+      <div class="params-grid" id="params-grid"></div>
+    </div>
+
+    <!-- 时间窗 + 倒计时面板 -->
+    <div class="panel" style="flex-shrink:0;max-height:100px;">
+      <div class="panel-header">
+        ⏰ 定时任务
+        <span class="badge" id="work-status-badge">全天</span>
+      </div>
+      <div style="padding:8px 14px;display:flex;align-items:center;gap:8px;font-size:12px;">
+        <span style="color:#8899aa;">每天</span>
+        <input type="number" id="work-start" min="0" max="23" value="14" style="width:50px;background:#0a0f16;color:#e0e0e0;border:1px solid #1e2d3d;border-radius:4px;padding:3px 6px;text-align:center;">
+        <span style="color:#8899aa;">:00 至</span>
+        <input type="number" id="work-end" min="0" max="24" value="22" style="width:50px;background:#0a0f16;color:#e0e0e0;border:1px solid #1e2d3d;border-radius:4px;padding:3px 6px;text-align:center;">
+        <span style="color:#8899aa;">:00</span>
+        <button class="btn btn-primary" style="padding:3px 10px;font-size:11px;" onclick="saveWorkTime()">保存</button>
+        <span id="countdown-display" style="margin-left:auto;color:#f5a623;font-weight:600;font-size:13px;"></span>
+      </div>
+    </div>
+
+    <!-- 日志面板 -->
+    <div class="panel log-panel">
+      <div class="panel-header">
+        📝 运行日志
+        <span class="badge" id="log-count">0 条</span>
+      </div>
+      <div class="log-content" id="log-content"></div>
+    </div>
+  </div>
+
+  <!-- 右侧：截图 -->
+  <div class="right">
+    <div class="screenshot-area">
+      <img id="screenshot-img" src="/api/screenshot" alt="浏览器截图">
+    </div>
+    <div class="reply-summary" id="reply-summary">等待启动...</div>
+    <div class="status-bar">
+      <span><span class="status-dot running" id="status-dot"></span> <span class="status-text" id="status-text">启动中</span></span>
+      <span class="status-stat" id="status-reply">回复: 0/0</span>
+      <span class="status-stat" id="status-today"></span>
+      <span class="status-stat" id="status-pending">待回复: 0</span>
+    </div>
+  </div>
+</div>
+
+<!-- 配置编辑器遮罩 -->
+<div class="overlay" id="config-overlay">
+  <div class="overlay-content">
+    <div class="overlay-header">
+      ✏️ 编辑 config.yml
+      <button class="close-btn" onclick="closeEditor()">&times;</button>
+    </div>
+    <div class="overlay-body">
+      <textarea id="config-editor"></textarea>
+    </div>
+    <div class="overlay-footer">
+      <span id="save-status" style="flex:1;font-size:12px;color:#f5a623;"></span>
+      <button class="btn btn-secondary" onclick="closeEditor()">取消</button>
+      <button class="btn btn-primary" onclick="saveConfig()">保存配置</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---------- 参数渲染 ----------
+function renderParams(data) {
+  const g = data.config_gobal;
+  const users = data.config_users;
+  const html = [
+    {label: "论坛", value: g.Host, cls: ""},
+    {label: "板块 (Fid)", value: (g.Fids || []).join(", "), cls: ""},
+    {label: "扫描页数", value: g.ScanPages, cls: ""},
+    {label: "回复数限制", value: g.ReplyLimit, cls: ""},
+    {label: "回复间隔", value: `${g.TimeIntervalStart}~${g.TimeIntervalEnd}s`, cls: ""},
+    {label: "轮询间隔", value: `${g.PollingMin}~${g.PollingMax}s`, cls: ""},
+    {label: "用户", value: (users || []).map(u => u.user).join(", "), cls: "user"},
+    {label: "Bark 推送", value: g.BarkUrl ? "已启用" : "未配置", cls: g.BarkUrl ? "ok" : "warn"},
+    {label: "代理", value: g.Proxy ? "已启用" : "禁用", cls: ""},
+    {label: "点赞", value: g.Like ? "已启用" : "禁用", cls: ""},
+    {label: "回复内容数", value: (g.ReplyContent || []).length + " 条", cls: ""},
+  ];
+  document.getElementById("params-grid").innerHTML = html.map(p =>
+    `<div class="param-item">
+       <span class="param-label">${p.label}</span>
+       <span class="param-value ${p.cls}">${p.value}</span>
+     </div>`
+  ).join("");
+}
+
+// ---------- 截图自动刷新 ----------
+const screenshotImg = document.getElementById("screenshot-img");
+function refreshScreenshot() {
+  screenshotImg.src = "/api/screenshot?t=" + Date.now();
+}
+
+// ---------- SSE 日志流 ----------
+const logContent = document.getElementById("log-content");
+let logBuf = [];
+
+function appendLog(line) {
+  const level = line.match(/\[(INFO|WARNING|ERROR|DEBUG)\]/)?.[1] || "INFO";
+  const div = document.createElement("div");
+  div.className = "log-line";
+  div.setAttribute("level", level);
+  div.textContent = line;
+  logContent.appendChild(div);
+  logContent.scrollTop = logContent.scrollHeight;
+  document.getElementById("log-count").textContent = logContent.children.length + " 条";
+}
+
+function connectLogStream() {
+  const evtSource = new EventSource("/api/log");
+  evtSource.onmessage = function(e) {
+    const data = JSON.parse(e.data);
+    appendLog(data.text);
+  };
+  evtSource.onerror = function() {
+    setTimeout(connectLogStream, 2000);
+  };
+}
+
+// ---------- 状态轮询 ----------
+function updateStatus() {
+  fetch("/api/status")
+    .then(r => r.json())
+    .then(data => {
+      // 状态点
+      const dot = document.getElementById("status-dot");
+      const st = document.getElementById("status-text");
+      st.textContent = data.status;
+      dot.className = "status-dot " + (
+        data.status.includes("等待") || data.status.includes("休眠") ? "sleeping" :
+        data.status.includes("错误") || data.status.includes("失败") ? "error" :
+        "running"
+      );
+
+      // 运行时
+      document.getElementById("runtime-badge").textContent = data.runtime;
+
+      // 回复统计
+      document.getElementById("status-reply").textContent =
+        `回复: ${data.total_reply_success}/${data.total_reply_sent}`;
+
+      // 今日已回复
+      const todayEl = document.getElementById("status-today");
+      const limit = data.daily_limit || 0;
+      if (limit > 0) {
+        todayEl.textContent = `今日 ${data.today_reply || 0}/${limit}`;
+      } else if (limit === -1) {
+        todayEl.textContent = `今日 ${data.today_reply || 0}/∞`;
+      } else {
+        todayEl.textContent = "";
+      }
+      document.getElementById("status-pending").textContent =
+        `待回复: ${data.pending_replies}`;
+
+      // 摘要
+      const summaryEl = document.getElementById("reply-summary");
+      if (data.last_reply_title) {
+        summaryEl.innerHTML = `<span class="label">最近回复:</span> ${data.last_reply_title} &mdash; ${data.last_reply_content}`;
+      } else {
+        summaryEl.innerHTML = `<span class="label">等待回复...</span>`;
+      }
+
+      // 参数
+      renderParams(data);
+
+      // 时间窗状态（只更新显示，不覆盖输入框）
+      document.getElementById("work-status-badge").textContent = data.work_window_text;
+
+      // 倒计时：更新基准值（仅在变化大于2秒时才覆盖，避免陈旧值覆盖本地平滑递减）
+      const sv = data.next_reply_countdown || 0;
+      if (sv > 0) {
+        if (!window._cdRef || Math.abs(sv - window._cdRef.value) > 2) {
+          window._cdRef = { value: sv, timestamp: Date.now() };
+        }
+      } else {
+        window._cdRef = null;
+        document.getElementById("countdown-display").textContent = "";
+      }
+    })
+    .catch(() => {});
+}
+
+// ---------- 定时设置 ----------
+function saveWorkTime() {
+  const start = parseInt(document.getElementById("work-start").value) || 0;
+  const end = parseInt(document.getElementById("work-end").value) || 24;
+  if (start >= end) { alert("开始时间必须小于结束时间"); return; }
+  fetch("/api/worktime", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({start, end}),
+  })
+    .then(r => r.json())
+    .then(d => {
+      if (!d.ok) { alert(d.message); return; }
+      // 保存成功提示
+      const btn = document.querySelector('button[onclick="saveWorkTime()"]');
+      const orig = btn.textContent;
+      btn.textContent = "已保存";
+      btn.style.background = "#2e7d32";
+      setTimeout(() => { btn.textContent = orig; btn.style.background = ""; }, 2000);
+    })
+    .catch(e => alert("保存失败: " + e));
+}
+
+// ---------- 配置编辑器 ----------
+function openEditor() {
+  document.getElementById("config-overlay").classList.add("active");
+  document.getElementById("save-status").textContent = "";
+  fetch("/api/config")
+    .then(r => r.text())
+    .then(text => {
+      document.getElementById("config-editor").value = text;
+    });
+}
+
+function closeEditor() {
+  document.getElementById("config-overlay").classList.remove("active");
+}
+
+function saveConfig() {
+  const content = document.getElementById("config-editor").value;
+  document.getElementById("save-status").textContent = "保存中...";
+  fetch("/api/config", {
+    method: "POST",
+    body: content,
+  })
+    .then(r => r.json())
+    .then(data => {
+      document.getElementById("save-status").textContent = data.message;
+      if (data.ok) {
+        setTimeout(closeEditor, 1500);
+      }
+    })
+    .catch(e => {
+      document.getElementById("save-status").textContent = "保存失败: " + e;
+    });
+}
+
+// ---------- 倒计时：基于基准值+本地时钟递减 ----------
+function tickCountdown() {
+  if (!window._cdRef) return;
+  const elapsed = Math.floor((Date.now() - window._cdRef.timestamp) / 1000);
+  const remaining = Math.max(0, window._cdRef.value - elapsed);
+  if (remaining <= 0) {
+    document.getElementById("countdown-display").textContent = "";
+    return;
+  }
+  const hh = Math.floor(remaining / 3600);
+  const mm = Math.floor((remaining % 3600) / 60);
+  const ss = remaining % 60;
+  document.getElementById("countdown-display").textContent =
+    "⏳ " + (hh > 0 ? hh+"h"+String(mm).padStart(2,"0")+"m" : mm+"m"+String(ss).padStart(2,"0")+"s");
+}
+setInterval(tickCountdown, 1000);
+
+// ---------- 启动 ----------
+connectLogStream();
+
+// 页面加载时从后端读取当前时间窗设置
+fetch("/api/status").then(r => r.json()).then(data => {
+  document.getElementById("work-start").value = data.work_time_start;
+  document.getElementById("work-end").value = data.work_time_end;
+});
+
+setInterval(updateStatus, 2000);
+setInterval(refreshScreenshot, 3000);
+updateStatus();
+</script>
+</body>
+</html>
