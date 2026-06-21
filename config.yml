@@ -30,7 +30,7 @@ gobal_config:
     http: ""
     https: ""
   ScanPages: 3
-  BarkUrl: ""
+  BarkUrl: ""                          # Bark iOS 推送 URL，如 https://api.day.app/你的设备Key
   LogFileName: "CaoLiu_AutoReply"
   AutoUpdate: true
   InputSelf: false
