@@ -4,7 +4,7 @@ users_config:
     secret: ""
 
 gobal_config:
-  Host: "your-forum-domain.com"
+  Host: "your-forum-domain.com" #论坛网址
   Fids: [7, 16]
   PollingMin: 60
   PollingMax: 300
