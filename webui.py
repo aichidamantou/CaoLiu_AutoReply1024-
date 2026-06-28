@@ -23,6 +23,21 @@ CONFIG_PATH = "config.yml"
 state = {
     "page": None,               # Playwright Page 对象引用
     "status": "启动中",
+    "incognito": {              # 无痕浏览状态（由 incognito_browser 更新）
+        "enabled": False,
+        "status": "",
+        "last_visit": "",
+        "visit_count": 0,
+        "next_countdown": 0,
+    },
+    "user_info": {              # 用户论坛信息（由 user_info 模块更新）
+        "title": "",
+        "posts": "?",
+        "pres": "?",
+        "usd": "?",
+        "last_update": "",
+        "raw": "",
+    },
     "users": [],
     "total_reply_success": 0,
     "total_reply_sent": 0,
@@ -189,6 +204,16 @@ def api_status():
     # 调试：打印 user_sleep 到日志
     logging.debug(f"user_sleep={state.get('user_sleep')} active={state.get('next_reply_countdown')}")
 
+    # 同步无痕浏览状态
+    incog_ref = state.get("incognito_ref")
+    if incog_ref is not None:
+        state["incognito"] = dict(incog_ref.state)
+
+    # 同步用户信息缓存
+    uif_ref = state.get("user_info_ref")
+    if uif_ref is not None:
+        state["user_info"] = dict(uif_ref.cache)
+
     return jsonify({
         "status": state["status"],
         "runtime": f"{h:02d}:{m:02d}:{s:02d}",
@@ -225,6 +250,8 @@ def api_status():
         "countdown_text": state["countdown_text"],
         "today_reply": state["today_reply"],
         "daily_limit": state["daily_limit"],
+        "incognito": state["incognito"],
+        "user_info": state["user_info"],
     })
 
 @app.route("/api/config", methods=["GET"])
@@ -280,6 +307,31 @@ def api_set_worktime():
     except Exception as e:
         return jsonify({"ok": False, "message": str(e)}), 500
 
+@app.route("/api/incognito_config", methods=["POST"])
+def api_set_incognito_config():
+    """修改无痕配置并持久化到 config.yml（重启后下次访问生效）"""
+    try:
+        data = request.get_json() or {}
+        with open(CONFIG_PATH, "r", encoding="utf8") as f:
+            cfg = yaml.safe_load(f) or {}
+        if "gobal_config" not in cfg or not isinstance(cfg["gobal_config"], dict):
+            cfg["gobal_config"] = {}
+        if "Incognito" not in cfg["gobal_config"] or not isinstance(cfg["gobal_config"]["Incognito"], dict):
+            cfg["gobal_config"]["Incognito"] = {}
+
+        incog = cfg["gobal_config"]["Incognito"]
+        for key in ("url", "work_start", "work_end", "interval_min", "interval_max", "stay_min", "stay_max"):
+            if key in data:
+                incog[key] = data[key]
+
+        with open(CONFIG_PATH, "w", encoding="utf8") as f:
+            yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
+
+        logging.info(f"无痕配置已保存到 config.yml")
+        return jsonify({"ok": True, "message": "配置已保存，重启后下次访问生效"})
+    except Exception as e:
+        return jsonify({"ok": False, "message": str(e)}), 500
+
 @app.route("/api/screenshot")
 def api_screenshot():
     """返回最新截图 (JPEG)"""
@@ -290,7 +342,7 @@ def api_screenshot():
 
 @app.route("/api/log")
 def api_log():
-    """SSE 日志流"""
+    """SSE 日志流（主日志）"""
     def generate():
         cursor = state["log_cursor"]
         # 先发送已有日志
@@ -304,6 +356,24 @@ def api_log():
                     yield f"data: {json.dumps({'text': line})}\n\n"
                 cursor = state["log_cursor"]
             time.sleep(0.5)
+    return Response(generate(), mimetype="text/event-stream")
+
+@app.route("/api/incognito_log")
+def api_incognito_log():
+    """SSE 日志流（无痕浏览专用）"""
+    def generate():
+        cursor = 0
+        # 先发一条清空信号
+        yield f"data: {json.dumps({'clear': True})}\n\n"
+        while True:
+            incog_ref = state.get("incognito_ref")
+            if incog_ref is not None:
+                lines = incog_ref.state.get("log_lines", [])
+                if len(lines) > cursor:
+                    for line in lines[cursor:]:
+                        yield f"data: {json.dumps({'text': line})}\n\n"
+                    cursor = len(lines)
+            time.sleep(1)
     return Response(generate(), mimetype="text/event-stream")
 
 # ---------- 启动 Web 服务 ----------
@@ -326,6 +396,7 @@ def update_state_from_user(user):
         "invalid": user.get_invalid(),
         "sleep": user.get_sleep_time(),
         "pending": len(user.reply_list),
+        "reply_success": getattr(user, 'total_reply_success', 0),
     }]
     sleep = user.get_sleep_time()
     state["user_sleep"] = sleep
@@ -339,6 +410,14 @@ def update_state_from_user(user):
 
 def set_page(page):
     state["page"] = page
+
+def set_incognito(incognito_instance):
+    """保存 IncognitoBrowser 引用，在 /api/status 返回其状态"""
+    state["incognito_ref"] = incognito_instance
+
+def set_user_info_fetcher(fetcher_instance):
+    """保存 UserInfoFetcher 引用，在 /api/status 返回其缓存"""
+    state["user_info_ref"] = fetcher_instance
 
 def set_status(s):
     state["status"] = s

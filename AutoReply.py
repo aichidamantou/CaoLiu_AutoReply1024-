@@ -76,6 +76,7 @@ proxies = g.get("Proxies", {}) if Proxy else {}
 Host = f"https://{g.get('Host', 't66y.com')}/"
 ScanPages = g.get("ScanPages", 3)          # 扫描板块前几页
 BarkUrl = g.get("BarkUrl", "")             # Bark 推送 URL，如 https://api.day.app/xxxx/
+IncognitoConfig = g.get("Incognito", {})   # 无痕浏览配置
 log = outputLog(LogFileName)
 # ==================== 验证码识别 API ====================
 def apitruecaptcha(content: bytes) -> str:
@@ -109,16 +110,6 @@ def ttshitu(content: bytes) -> str:
     except Exception as e:
         log.error(f"ttshitu error: {e}")
         return "XXXX"
-# ==================== Bark 推送 ====================
-def bark_push(title: str, body: str = ""):
-    """通过 Bark 推送消息到 iOS"""
-    if not BarkUrl:
-        return
-    try:
-        url = f"{BarkUrl.rstrip('/')}/{title}/{body}"
-        requests.get(url, timeout=5)
-    except Exception as e:
-        log.debug(f"Bark 推送失败: {e}")
 # ==================== User 类（Playwright 版） ====================
 class User:
     """论坛用户，用 Playwright 控制真实浏览器操作"""
@@ -141,7 +132,7 @@ class User:
         self.daily_limit = ReplyLimit            # -1=不限制
         self.today_date = ""                     # 当前日期字符串
         self.today_reply_count = 0               # 今日已回复数
-        self._profile_cache = {}                 # profile 信息缓存
+        self.profile = {"posts": "?", "pres": "?", "usd": "?", "contribution": "?"}
     async def init_context(self, browser, proxy_settings: Optional[dict] = None):
         """为当前用户创建独立的浏览器上下文（cookie/存储隔离）"""
         self.context = await browser.new_context(
@@ -311,19 +302,39 @@ class User:
             log.warning(f"[{self.username}] 验证码识别结果为空，跳过")
     # ---------- 获取帖子列表 ----------
     async def get_personal_posted_list(self):
-        """获取自己已回复过的帖子列表"""
+        """获取自己已回复过的帖子列表（多页翻取）"""
+        if os.path.exists(self.cookie_file.replace('_cookies.json', '_replied.json')):
+            try:
+                with open(self.cookie_file.replace('_cookies.json', '_replied.json'), 'r', encoding='utf-8') as f:
+                    saved = json.load(f)
+                if isinstance(saved, list) and len(saved) > 0:
+                    self.exclude_content_tids = saved
+                    log.info(f"[{self.username}] 从文件加载已回复帖子: {len(self.exclude_content_tids)} 条")
+                    return
+            except Exception as e:
+                log.debug(f"[{self.username}] 加载已回复缓存失败: {e}")
+
         try:
-            url = urljoin(Host, "personal.php?action=post")
-            await self.page.goto(url, wait_until="domcontentloaded")
-            await self._rand_sleep(2, 3)
-            body = await self.page.content()
-            for m in re.finditer(r'<a\s+[^>]*href="/*([^"]+)"[^>]+class="a2">', body):
-                tid = self._extract_tid(m.group(1))
-                if tid:
-                    self.exclude_content_tids.append(tid)
-            log.debug(f"[{self.username}] 已回复帖子数: {len(self.exclude_content_tids)}")
+            for page in range(1, 21):  # 最多翻 20 页
+                url = urljoin(Host, f"personal.php?action=post&page={page}")
+                await self.page.goto(url, wait_until="domcontentloaded")
+                await self._rand_sleep(2, 3)
+                body = await self.page.content()
+
+                found = 0
+                for m in re.finditer(r'<a\s+[^>]*href="/*([^"]+)"[^>]+class="a2">', body):
+                    tid = self._extract_tid(m.group(1))
+                    if tid:
+                        self.exclude_content_tids.append(tid)
+                        found += 1
+                if found == 0:
+                    break  # 没有更多了
+                log.debug(f"[{self.username}] 第{page}页: {found} 帖")
+            log.info(f"[{self.username}] 已回复帖子总数: {len(self.exclude_content_tids)}")
         except Exception as e:
             log.error(f"[{self.username}] 获取已回复列表失败: {e}")
+        # 保存到文件，Docker 重启后可用
+        self._save_replied_cache()
     async def get_today_list(self, fids: List[int], pages: int = 3):
         """获取今日新帖列表（多板块、多页）"""
         for fid in fids:
@@ -490,9 +501,18 @@ class User:
             self.total_reply_success += 1
             status_str = f"今日 {self.today_reply_count}/{self.daily_limit}" if self.daily_limit != -1 else f"会话 {self.reply_count}"
             log.info(f"[{self.username}] 回复成功 → 「{title}」 {content_text} {status_str}")
-            pc = self._profile_cache
-            bark_push(f"📊 发帖{pc.get('posts', '?')} · 威望{pc.get('pres', '?')} · 金钱{pc.get('usd', '?')}",
-                      f"{self.username} 已回{self.total_reply_success}帖")
+            from bark_push import push_reply_success
+            push_reply_success(BarkUrl, self.username,
+                               self.total_reply_success,
+                               posts=self.profile.get("posts", "?"),
+                               pres=self.profile.get("pres", "?"),
+                               usd=self.profile.get("usd", "?"),
+                               contribution=self.profile.get("contribution", "?"))
+            # 追加到已回复列表并保存
+            reply_tid = self._extract_tid(url)
+            if reply_tid and reply_tid not in self.exclude_content_tids:
+                self.exclude_content_tids.append(reply_tid)
+                self._save_replied_cache()
             return "success"
         except Exception as e:
             log.error(f"[{self.username}] 回复异常 {url}: {e}")
@@ -542,41 +562,6 @@ class User:
                 log.info(f"[{self.username}] 点赞成功 (#{reply_id})")
         except Exception as e:
             log.debug(f"[{self.username}] 点赞异常: {e}")
-    # ---------- 查询 ----------
-    async def get_user_info(self) -> str:
-        for _ in range(3):
-            try:
-                profile_url = urljoin(Host, "profile.php")
-                await self.page.goto(profile_url, wait_until="domcontentloaded", timeout=15_000)
-                await self._rand_sleep(3, 5)
-                body = await self.page.content()
-                if "UID" not in body or self.username not in body:
-                    return "未登录"
-                # 多模式匹配，适应不同的页面 HTML 格式
-                title = "?"
-                m = re.search(r"會員頭銜[：:]\s*([^<]+)", body)
-                if m:
-                    title = m.group(1).strip()
-                posts = "?"
-                m = re.search(r"發帖[：:]?\s*(\d+)", body)
-                if m:
-                    posts = m.group(1)
-                m = re.search(r"威望[：:]?\s*(\d+)", body)
-                if m:
-                    pres = m.group(1)
-                else:
-                    pres = "?"
-                usd = "?"
-                m = re.search(r"金錢[：:]?\s*(\d+)", body)
-                if m:
-                    usd = m.group(1)
-                self._profile_cache = {
-                    "posts": posts, "pres": pres, "usd": usd, "title": title
-                }
-                return f"发帖{posts} 威望{pres} 金钱{usd}"
-            except Exception as e:
-                await asyncio.sleep(3)
-        return "查询失败"
     # ---------- 工具 ----------
     @staticmethod
     def _extract_tid(url: str) -> Optional[str]:
@@ -584,6 +569,14 @@ class User:
         if m:
             return m.group(1) or m.group(2)
         return None
+    def _save_replied_cache(self):
+        """将已回复帖子 tid 列表保存到文件，Docker 重启后可恢复"""
+        try:
+            path = self.cookie_file.replace('_cookies.json', '_replied.json')
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(list(set(self.exclude_content_tids)), f, ensure_ascii=False)
+        except Exception as e:
+            log.debug(f"[{self.username}] 保存已回复缓存失败: {e}")
     @staticmethod
     async def _rand_sleep(lo: int, hi: int):
         await asyncio.sleep(random.randint(lo, hi))
@@ -655,8 +648,7 @@ async def main():
             return
         log.info("=" * 50)
         for u in valid_users:
-            info = await u.get_user_info()
-            log.info(f"[{u.get_username()}] {info}")
+            log.info(f"[{u.get_username()}] 已登录 — 待回复 {len(u.reply_list)} 帖")
         log.info("=" * 50)
         try:
             stats_counter = 0
@@ -688,31 +680,24 @@ async def main():
                             u.set_invalid()
                             continue
                     await u.like(url)
+                    # 每次回复成功后刷新用户信息
+                    if u.page and not u.page.is_closed():
+                        await uif.fetch(u.page)
+                        webui.update_state_from_user(u)
                     stats_counter += 1
                     if stats_counter % 5 == 0:
                         for u2 in valid_users:
                             if not u2.get_invalid():
-                                info = await u2.get_user_info()
-                                pc2 = u2._profile_cache
-                                posts = pc2.get("posts", "?")
-                                pres = pc2.get("pres", "?")
-                                usd = pc2.get("usd", "?")
-                                bar = f"[{u2.get_username()}] {u2.total_reply_success}/{u2.total_reply_sent} 成功 | {info}"
+                                bar = f"[{u2.get_username()}] {u2.total_reply_success}/{u2.total_reply_sent} 成功"
                                 log.info(bar)
-                                bark_push(f"📊 发帖{posts} · 威望{pres} · 金钱{usd}", f"{u2.get_username()} 已回{u2.total_reply_success}帖")
                     st = random.randint(TimeIntervalStart, TimeIntervalEnd)
                     log.debug(f"[{u.get_username()}] 休息 {st}s")
                     u.set_sleep_time(st)
                 if all_done:
                     log.info("=" * 50)
                     for u2 in valid_users:
-                        info = await u2.get_user_info()
-                        pc = u2._profile_cache
-                        posts = pc.get("posts", "?")
-                        pres = pc.get("pres", "?")
-                        usd = pc.get("usd", "?")
-                        log.info(f"[{u2.get_username()}] {u2.total_reply_success}/{u2.total_reply_sent} 成功 | 发帖{posts} 威望{pres} 金钱{usd}")
-                        bark_push(f"🏁 发帖{posts} · 威望{pres} · 金钱{usd}", f"{u2.get_username()} 本轮{u2.total_reply_success}帖")
+                        log.info(f"[{u2.get_username()}] {u2.total_reply_success}/{u2.total_reply_sent} 成功")
+                        from bark_push import push_finish; push_finish(BarkUrl, u2.get_username(), u2.total_reply_success)
                     log.info("=" * 50)
                     log.info("退出")
                     break
@@ -744,6 +729,8 @@ def run_with_web():
 async def main_with_web(webui):
     """带 Web UI 的 main"""
     from playwright.async_api import async_playwright
+    from incognito_browser import IncognitoBrowser
+    from user_info import UserInfoFetcher
     log.info(f"CaoLiu_AutoReply v{__version__} (Playwright + WebUI) 启动")
     log.info(f"Web 面板: http://0.0.0.0:{WEB_PORT}/")
     if not users_config:
@@ -830,6 +817,32 @@ async def main_with_web(webui):
             webui.update_state_from_user(u)
             valid_users.append(u)
             webui.set_page(u.page)
+        # 初始化无痕浏览
+        incognito = IncognitoBrowser(IncognitoConfig)
+        webui.set_incognito(incognito)   # 把引用传给 webui 读取状态
+        incognito.start()
+        log.info(f"[无痕浏览] {'已启用' if incognito.state['enabled'] else '未配置'}")
+
+        # 初始化用户信息定时刷新
+        uif = UserInfoFetcher(Host)
+        webui.set_user_info_fetcher(uif)
+        def _get_page():
+            for u in valid_users:
+                if u.page and not u.page.is_closed():
+                    return u.page
+            return None
+        def _on_info_update():
+            for u in valid_users:
+                webui.update_state_from_user(u)
+                # 同步 profile 到 User 对象（给 bark 推送用）
+                u.profile = {
+                    "posts": uif.cache.get("posts", "?"),
+                    "pres": uif.cache.get("pres", "?"),
+                    "usd": uif.cache.get("usd", "?"),
+                    "contribution": uif.cache.get("contribution", "?"),
+                }
+        uif.start(_get_page, _on_info_update)
+
         # 启动截图循环
         screenshot_task = asyncio.create_task(webui.screenshot_loop())
         webui.set_status(f"已登录 {len(valid_users)} 个用户")
@@ -844,8 +857,8 @@ async def main_with_web(webui):
             return
         log.info("=" * 50)
         for u in valid_users:
-            info = await u.get_user_info()
-            log.info(f"[{u.get_username()}] {info}")
+            log.info(f"[{u.get_username()}] 已登录 — 待回复 {len(u.reply_list)} 帖")
+            webui.update_state_from_user(u)
         log.info("=" * 50)
         # ---------- 工作时间窗 ----------
         def _is_work_time():
@@ -906,13 +919,13 @@ async def main_with_web(webui):
                 _update_countdown()
                 if not _is_work_time():
                     webui.set_status(f"⏰ 非工作时间 — {webui.state['countdown_text']} 后开始")
-                    if time.time() - _last_wt_check > 30:
+                    if time.time() - _last_wt_check > 300:
                         log.info(f"⏰ 非工作时间 ({time.localtime().tm_hour}:00)，下次工作: {webui.state['countdown_text']} 后")
                         _last_wt_check = time.time()
-                    await asyncio.sleep(15)
+                    await asyncio.sleep(60)
                     for u in valid_users:
                         if u.get_sleep_time() > 0:
-                            u.set_sleep_time(max(0, u.get_sleep_time() - 15))
+                            u.set_sleep_time(max(0, u.get_sleep_time() - 60))
                     continue
                 else:
                     # 进入工作时间或时间窗被改为全天，重置状态
@@ -960,14 +973,8 @@ async def main_with_web(webui):
                     if stats_counter % 5 == 0:
                         for u2 in valid_users:
                             if not u2.get_invalid():
-                                info = await u2.get_user_info()
-                                pc2 = u2._profile_cache
-                                posts = pc2.get("posts", "?")
-                                pres = pc2.get("pres", "?")
-                                usd = pc2.get("usd", "?")
-                                bar = f"[{u2.get_username()}] {u2.total_reply_success}/{u2.total_reply_sent} 成功 | {info}"
+                                bar = f"[{u2.get_username()}] {u2.total_reply_success}/{u2.total_reply_sent} 成功"
                                 log.info(bar)
-                                bark_push(f"📊 发帖{posts} · 威望{pres} · 金钱{usd}", f"{u2.get_username()} 已回{u2.total_reply_success}帖")
                     st = random.randint(TimeIntervalStart, TimeIntervalEnd)
                     log.debug(f"[{u.get_username()}] 休息 {st}s")
                     u.set_sleep_time(st)
@@ -976,13 +983,8 @@ async def main_with_web(webui):
                 if all_done:
                     log.info("=" * 50)
                     for u2 in valid_users:
-                        info = await u2.get_user_info()
-                        pc = u2._profile_cache
-                        posts = pc.get("posts", "?")
-                        pres = pc.get("pres", "?")
-                        usd = pc.get("usd", "?")
-                        log.info(f"[{u2.get_username()}] {u2.total_reply_success}/{u2.total_reply_sent} 成功 | 发帖{posts} 威望{pres} 金钱{usd}")
-                        bark_push(f"🏁 发帖{posts} · 威望{pres} · 金钱{usd}", f"{u2.get_username()} 本轮{u2.total_reply_success}帖")
+                        log.info(f"[{u2.get_username()}] {u2.total_reply_success}/{u2.total_reply_sent} 成功")
+                        from bark_push import push_finish; push_finish(BarkUrl, u2.get_username(), u2.total_reply_success)
                     log.info("=" * 50)
                     log.info("退出")
                     webui.set_status("所有任务完成")
@@ -999,6 +1001,8 @@ async def main_with_web(webui):
             webui.set_status("已停止")
         finally:
             screenshot_task.cancel()
+            incognito.stop()
+            uif.stop()
             for u in valid_users:
                 if u.context and not u.get_invalid():
                     await u._save_cookies()

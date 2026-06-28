@@ -1,5 +1,6 @@
 *.log
-cookies.json
+*.json
 __pycache__/
 .DS_Store
 .env
+config.yml
