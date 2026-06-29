@@ -1,19 +1,17 @@
 """
 草榴自动回复 - Web 管理界面
-Flask + SSE 日志流 + 实时截图 + 配置编辑
+Flask + SSE 日志流 + 配置编辑
 """
 import os
 import sys
 import time
 import json
-import asyncio
 import threading
 import logging
 import yaml
-import io
 import re
 
-from flask import Flask, render_template, jsonify, request, Response, send_file
+from flask import Flask, render_template, jsonify, request, Response
 
 app = Flask(__name__)
 
@@ -21,7 +19,6 @@ CONFIG_PATH = "config.yml"
 
 # ---------- 全局状态（由 AutoReply 主循环更新） ----------
 state = {
-    "page": None,               # Playwright Page 对象引用
     "status": "启动中",
     "incognito": {              # 无痕浏览状态（由 incognito_browser 更新）
         "enabled": False,
@@ -42,7 +39,6 @@ state = {
     "total_reply_success": 0,
     "total_reply_sent": 0,
     "reply_list_count": 0,
-    "last_screenshot": None,    # bytes
     "last_reply_title": "",
     "last_reply_content": "",
     "last_error": "",
@@ -110,18 +106,6 @@ if isinstance(_wts, int) and isinstance(_wte, int) and 0 <= _wts < _wte <= 24:
     state["work_time_end"] = _wte
 
 # ---------- 截图任务（在事件循环中运行） ----------
-
-async def screenshot_loop():
-    """每 2 秒截一次图"""
-    while True:
-        try:
-            p = state.get("page")
-            if p and not p.is_closed():
-                buf = await p.screenshot(type="jpeg", quality=70, full_page=False)
-                state["last_screenshot"] = buf
-        except Exception:
-            pass
-        await asyncio.sleep(2)
 
 # ---------- 倒计时计算（在 Flask 线程实时计算） ----------
 
@@ -332,14 +316,6 @@ def api_set_incognito_config():
     except Exception as e:
         return jsonify({"ok": False, "message": str(e)}), 500
 
-@app.route("/api/screenshot")
-def api_screenshot():
-    """返回最新截图 (JPEG)"""
-    buf = state.get("last_screenshot")
-    if buf:
-        return send_file(io.BytesIO(buf), mimetype="image/jpeg")
-    return "", 204
-
 @app.route("/api/log")
 def api_log():
     """SSE 日志流（主日志）"""
@@ -407,10 +383,6 @@ def update_state_from_user(user):
         state["today_reply"] = user.today_reply_count
     if hasattr(user, 'daily_limit'):
         state["daily_limit"] = user.daily_limit
-
-def set_page(page):
-    state["page"] = page
-
 def set_incognito(incognito_instance):
     """保存 IncognitoBrowser 引用，在 /api/status 返回其状态"""
     state["incognito_ref"] = incognito_instance

@@ -799,7 +799,6 @@ async def main_with_web(webui):
                 log.warning("跳过配置不完整的用户")
                 continue
             await u.init_context(browser, pw_proxy)
-            webui.set_page(u.page)  # 把 page 传给 webui 截图
             await u.check_cookies_and_login()
             if u.get_invalid():
                 await u.close()
@@ -816,7 +815,6 @@ async def main_with_web(webui):
                 webui.state["user_sleep_time"] = time.time()
             webui.update_state_from_user(u)
             valid_users.append(u)
-            webui.set_page(u.page)
         # 初始化无痕浏览
         incognito = IncognitoBrowser(IncognitoConfig)
         webui.set_incognito(incognito)   # 把引用传给 webui 读取状态
@@ -843,8 +841,6 @@ async def main_with_web(webui):
                 }
         uif.start(_get_page, _on_info_update)
 
-        # 启动截图循环
-        screenshot_task = asyncio.create_task(webui.screenshot_loop())
         webui.set_status(f"已登录 {len(valid_users)} 个用户")
         # 初始化 webui 状态
         for u in valid_users:
@@ -852,7 +848,6 @@ async def main_with_web(webui):
             webui.state["daily_limit"] = u.daily_limit
         if not valid_users:
             log.error("没有有效用户，退出")
-            screenshot_task.cancel()
             await browser.close()
             return
         log.info("=" * 50)
@@ -945,7 +940,6 @@ async def main_with_web(webui):
                         continue
                     webui.set_status(f"正在回复: {url.split('/')[-1][:40]}")
                     await u.browse(url)
-                    webui.set_page(u.page)
                     reply_result = await u.reply(url)
                     # 记录到 webui
                     webui.record_reply(
@@ -1000,7 +994,6 @@ async def main_with_web(webui):
             log.info("收到 Ctrl+C...")
             webui.set_status("已停止")
         finally:
-            screenshot_task.cancel()
             incognito.stop()
             uif.stop()
             for u in valid_users:
