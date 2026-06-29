@@ -265,12 +265,16 @@ function appendLog(line) {
 }
 
 function connectLogStream() {
+  if (window._mainSSE) window._mainSSE.close();
   const evtSource = new EventSource("/api/log");
+  window._mainSSE = evtSource;
   evtSource.onmessage = function(e) {
     const data = JSON.parse(e.data);
     appendLog(data.text);
   };
   evtSource.onerror = function() {
+    evtSource.close();
+    window._mainSSE = null;
     setTimeout(connectLogStream, 2000);
   };
 }
@@ -290,7 +294,10 @@ function appendIncognitoLog(line) {
 }
 
 function connectIncognitoLogStream() {
+  // 关闭旧连接，防止重复
+  if (window._incogSSE) window._incogSSE.close();
   const evtSource = new EventSource("/api/incognito_log");
+  window._incogSSE = evtSource;
   evtSource.onmessage = function(e) {
     const data = JSON.parse(e.data);
     // 清空信号：页面重连时清掉旧日志
@@ -302,6 +309,8 @@ function connectIncognitoLogStream() {
     appendIncognitoLog(data.text);
   };
   evtSource.onerror = function() {
+    evtSource.close();
+    window._incogSSE = null;
     setTimeout(connectIncognitoLogStream, 2000);
   };
 }

@@ -162,68 +162,85 @@ class IncognitoBrowser:
         return headers
 
     async def _visit_once(self, browser):
-        """单次无痕访问流程 — 每次使用随机指纹"""
+        """单次无痕访问流程 — 完整模拟：入口→跳转→年龄验证→首页停留→刷新→关闭"""
         ua = random.choice(self.UA_POOL)
         vp = random.choice(self.VIEWPORT_POOL)
         locale = random.choice(self.LOCALE_POOL)
         extra_headers = self._rand_extra_headers()
 
-        # 判断是手机端还是桌面端 UA，适当调整视口
         is_mobile = "Mobile" in ua or "iPhone" in ua
         if is_mobile:
             vp = random.choice([
-                {"width": 390, "height": 844},
-                {"width": 375, "height": 812},
-                {"width": 414, "height": 896},
-                {"width": 412, "height": 915},
+                {"width": 390, "height": 844}, {"width": 375, "height": 812},
+                {"width": 414, "height": 896}, {"width": 412, "height": 915},
             ])
 
         self._info(f"🔄 指纹: {ua.split('/')[3].split('.')[0] if 'Chrome' in ua else ua.split('/')[1].split('.')[0]} | {vp['width']}x{vp['height']}")
 
         context = await browser.new_context(
-            locale=locale,
-            timezone_id="Asia/Shanghai",
-            user_agent=ua,
-            viewport=vp,
-            extra_http_headers=extra_headers,
+            locale=locale, timezone_id="Asia/Shanghai",
+            user_agent=ua, viewport=vp, extra_http_headers=extra_headers,
         )
         page = await context.new_page()
 
         try:
-            self._info(f"🌐 正在访问 {self.url}")
-            await page.goto(self.url, wait_until="domcontentloaded", timeout=30_000)
-            await asyncio.sleep(random.uniform(1, 3))
+            # ===== 第1步：访问入口页 =====
+            self._info(f"🌐 第1步: 访问入口 {self.url}")
+            await page.goto(self.url, wait_until="networkidle", timeout=30_000)
+            await asyncio.sleep(random.uniform(2, 4))
+            body = await page.inner_text("body")
+            self._info(f"✅ 入口加载完成 — {body[:80].strip() if body else '空'}")
 
-            # 点击年龄验证入口
-            clicked = False
+            # ===== 第2步：点击「按此跳转最新地址」 =====
+            self._info("第2步: 点击「按此跳转最新地址」...")
+            link = await page.query_selector("a")
+            if link:
+                await link.click()
+                await asyncio.sleep(random.uniform(2, 4))
+                self._info(f"✅ 已点击跳转链接 — 当前URL: {page.url}")
+            else:
+                self._info("⚠️ 未找到跳转链接，尝试直接访问")
+
+            # ===== 第3步：年龄验证页面 — 点击「滿18歲」 =====
+            self._info("第3步: 年龄验证 — 点击「滿18歲」...")
             try:
-                age_link = await page.query_selector('a[onclick*="document.frm.submit"]')
-                if age_link:
-                    await age_link.click()
+                # 直接用 evaluate 提交表单（比点击更可靠）
+                has_form = await page.evaluate("typeof document.frm !== 'undefined' && document.frm !== null")
+                if has_form:
+                    await page.evaluate("document.frm.submit()")
+                    await page.wait_for_load_state("networkidle", timeout=15_000)
                     await asyncio.sleep(random.uniform(2, 4))
-                    self._info("✅ 已点击「滿18歲」入口")
-                    clicked = True
+                    self._info(f"✅ 年龄验证通过 — 已跳转至社区，当前URL: {page.url}")
                 else:
-                    # 尝试模糊匹配
-                    all_links = await page.query_selector_all('a')
-                    for link in all_links:
-                        onclick = await link.get_attribute('onclick') or ''
-                        text = await link.inner_text()
-                        if 'submit' in onclick or '18' in text or '滿' in text:
-                            await link.click()
-                            await asyncio.sleep(random.uniform(2, 4))
-                            self._info("✅ 已点击年龄验证链接（模糊匹配）")
-                            clicked = True
-                            break
-                    if not clicked:
-                        self._info("⚠️ 未找到年龄验证链接，页面可能已直通")
+                    # 后备：通过文本匹配点击
+                    age_btn = await page.query_selector("text=滿 18 歲")
+                    if age_btn:
+                        await age_btn.click()
+                        await page.wait_for_load_state("networkidle", timeout=15_000)
+                        await asyncio.sleep(random.uniform(2, 4))
+                        self._info(f"✅ 年龄验证通过 — 已跳转至社区，当前URL: {page.url}")
+                    else:
+                        self._info("⚠️ 未找到年龄验证入口，可能直通")
             except Exception as e:
-                self._info(f"⚠️ 点击年龄验证异常: {e}")
+                self._info(f"⚠️ 年龄验证异常: {e}")
 
-            # 随机停留
-            stay = random.randint(self.stay_min, self.stay_max)
-            self._info(f"⏳ 停留 {stay}s (随机 {self.stay_min}~{self.stay_max}s)...")
-            await asyncio.sleep(stay)
+            # ===== 第4步：在首页停留 =====
+            stay1 = random.randint(10, 60)
+            self._info(f"⏳ 第4步: 浏览首页 {stay1}s...")
+            await asyncio.sleep(stay1)
+
+            # ===== 第5步：刷新再停留 =====
+            self._info("第5步: 刷新页面...")
+            try:
+                await page.reload(wait_until="networkidle", timeout=20_000)
+                await asyncio.sleep(random.uniform(2, 4))
+                self._info("✅ 刷新完成")
+            except Exception as e:
+                self._info(f"⚠️ 刷新异常: {e}")
+
+            stay2 = random.randint(30, 120)
+            self._info(f"⏳ 第5步续: 刷新后停留 {stay2}s...")
+            await asyncio.sleep(stay2)
 
             self._info("✅ 无痕访问完成")
             self.state['visit_count'] += 1
